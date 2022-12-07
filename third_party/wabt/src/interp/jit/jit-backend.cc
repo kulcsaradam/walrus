@@ -120,6 +120,23 @@ static void emitLocalMove(sljit_compiler* compiler, Instruction* instr) {
   sljit_emit_op1(compiler, opcode, dst.arg, dst.argw, src.arg, src.argw);
 }
 
+static void op0Instr(sljit_compiler* compiler,
+                     sljit_s32 opcode,
+                     bool is_div,
+                     JITArg args[],
+                     ValueInfo value_info) {
+  sljit_s32 mov = SLJIT_MOV;
+  if ((value_info & LocationInfo::kSizeMask) == 1) {
+    mov = SLJIT_MOV32;
+  }
+
+  sljit_emit_op1(compiler, mov, SLJIT_R0, 0, args[0].arg, args[0].argw);
+  sljit_emit_op1(compiler, mov, SLJIT_R1, 0, args[1].arg, args[1].argw);
+  sljit_emit_op0(compiler, opcode);
+  sljit_emit_op1(compiler, mov, args[2].arg, args[2].argw,
+                 is_div ? SLJIT_R0 : SLJIT_R1, 0);
+}
+
 static void emitBinary(sljit_compiler* compiler, Instruction* instr) {
   Operand* operands = instr->operands();
   JITArg args[3];
@@ -141,9 +158,20 @@ static void emitBinary(sljit_compiler* compiler, Instruction* instr) {
       opcode = SLJIT_MUL32;
       break;
     case Opcode::I32DivS:
+      op0Instr(compiler, SLJIT_DIV_S32, true, args,
+               operands->location.value_info);
+      return;
     case Opcode::I32DivU:
+      op0Instr(compiler, SLJIT_DIV_U32, true, args,
+               operands->location.value_info);
+      return;
     case Opcode::I32RemS:
+      op0Instr(compiler, SLJIT_DIVMOD_S32, false, args,
+               operands->location.value_info);
+      return;
     case Opcode::I32RemU:
+      op0Instr(compiler, SLJIT_DIVMOD_U32, false, args,
+               operands->location.value_info);
       return;
     case Opcode::I32Rotl:
       opcode = SLJIT_ROTL32;
@@ -179,9 +207,20 @@ static void emitBinary(sljit_compiler* compiler, Instruction* instr) {
       opcode = SLJIT_MUL;
       break;
     case Opcode::I64DivS:
+      op0Instr(compiler, SLJIT_DIV_SW, true, args,
+               operands->location.value_info);
+      return;
     case Opcode::I64DivU:
+      op0Instr(compiler, SLJIT_DIV_UW, true, args,
+               operands->location.value_info);
+      return;
     case Opcode::I64RemS:
+      op0Instr(compiler, SLJIT_DIVMOD_SW, false, args,
+               operands->location.value_info);
+      return;
     case Opcode::I64RemU:
+      op0Instr(compiler, SLJIT_DIVMOD_UW, false, args,
+               operands->location.value_info);
       return;
     case Opcode::I64Rotl:
       opcode = SLJIT_ROTL;
@@ -214,6 +253,59 @@ static void emitBinary(sljit_compiler* compiler, Instruction* instr) {
 
   sljit_emit_op2(compiler, opcode, args[2].arg, args[2].argw, args[0].arg,
                  args[0].argw, args[1].arg, args[1].argw);
+}
+
+void PopCnt(sljit_compiler* compiler, JITArg args[], sljit_s32 mov) {
+  sljit_uw num = args[0].argw;
+
+  num = num - ((num >> 1) & 0x7777777777777777) -
+        ((num >> 2) & 0x3333333333333333) - ((num >> 3) & 0x1111111111111111);
+  num = ((num + (num >> 4)) & 0x0F0F0F0F0F0F0F0F) % 255;
+
+  sljit_emit_op1(compiler, mov, args[1].arg, args[1].argw, SLJIT_IMM, num);
+}
+
+static void emitUnary(sljit_compiler* compiler, Instruction* instr) {
+  Operand* operand = instr->operands();
+  JITArg args[2];
+
+  for (int i = 0; i < 2; ++i) {
+    operandToArg(operand + i, args[i]);
+  }
+
+  sljit_s32 opcode;
+  sljit_s32 mov = SLJIT_MOV;
+
+  if ((operand->location.value_info & LocationInfo::kSizeMask) == 1) {
+    mov = SLJIT_MOV32;
+  }
+
+  switch (instr->opcode()) {
+    case Opcode::I32Ctz:
+      opcode = SLJIT_CTZ32;
+      break;
+    case Opcode::I32Clz:
+      opcode = SLJIT_CLZ32;
+      break;
+    case Opcode::I64Ctz:
+      opcode = SLJIT_CTZ;
+      break;
+    case Opcode::I64Clz:
+      opcode = SLJIT_CLZ;
+      break;
+    case Opcode::I32Popcnt:
+      PopCnt(compiler, args, mov);
+      return;
+    case Opcode::I64Popcnt:
+      PopCnt(compiler, args, mov);
+      return;
+    default:
+      WABT_UNREACHABLE;
+      break;
+  }
+
+  sljit_emit_op1(compiler, mov, SLJIT_R0, 0, args[0].arg, args[0].argw);
+  sljit_emit_op1(compiler, opcode, args[1].arg, args[1].argw, SLJIT_R0, 0);
 }
 
 static bool emitCompare(sljit_compiler* compiler, Instruction* instr) {
@@ -431,6 +523,10 @@ void JITCompiler::compile() {
       }
       case Instruction::Binary: {
         emitBinary(compiler_, item->asInstruction());
+        break;
+      }
+      case Instruction::Unary: {
+        emitUnary(compiler_, item->asInstruction());
         break;
       }
       case Instruction::Compare: {
