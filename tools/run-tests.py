@@ -278,12 +278,11 @@ def run_wamr_compiler_tests(engine):
     if fail_total > 0:
         raise Exception("other wamr-compiler tests failed")
 
-@runner('programs', default=True)
-def run_program_tests(engine):
-    TEST_DIR = join(PROJECT_SOURCE_DIR, 'test', 'programs', 'executables')
+def run_dhrystone_tests(engine):
+    TEST_DIR = join(PROJECT_SOURCE_DIR, 'test', 'programs', 'dhrystone')
 
-    print('Running program tests:')
-    xpass = glob(join(TEST_DIR, '*.wasm'), recursive=True)
+    print('Running dhrystone tests:')
+    xpass = glob(join(TEST_DIR, '**/*.wasm'), recursive=True)
     xpass_result = _run_wast_tests(engine, xpass, False)
 
     tests_total = len(xpass)
@@ -293,7 +292,7 @@ def run_program_tests(engine):
     print('%sFAIL : %d%s' % (COLOR_RED, fail_total, COLOR_RESET))
 
     if fail_total > 0:
-        raise Exception("program tests failed")
+        raise Exception("dhrystone tests failed")
 
 def main():
     parser = ArgumentParser(description='Walrus Test Suite Runner')
