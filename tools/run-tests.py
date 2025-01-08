@@ -193,6 +193,9 @@ def run_extended_tests(engine):
     for test_case in other_test_run_config['test cases']:
         if test_case['deprecated']:
             continue
+        # walrus currently does not support gc
+        if 'runtime' in test_case.keys() and test_case['runtime'].endswith("gc-enabled"):
+            continue
 
         test_paths = sum(
                 [glob(join(TEST_DIR, 'regression', f'issue-{id}', '*.wasm'), recursive=False) for id in test_case['ids']],
