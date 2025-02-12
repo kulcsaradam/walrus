@@ -638,7 +638,7 @@ private:
          *
          * m_currentFunction->peekByteCode<Walrus::UnaryOperation>(m_lastI32EqzPos)->dstOffset() == stackPos
          * checks if the output of I32Eqz is the input of JumpIfTrue/JumpIfFalse
-        */
+         */
         return (m_lastI32EqzPos + sizeof(Walrus::I32Eqz) == m_currentFunction->currentByteCodeSize())
             && (m_currentFunction->peekByteCode<Walrus::UnaryOperation>(m_lastI32EqzPos)->dstOffset() == stackPos);
     }
@@ -1286,7 +1286,7 @@ public:
 
     size_t computeExprResultPosition(Walrus::Value::Type type)
     {
-        if (!m_preprocessData.m_inPreprocess) {
+        if (!m_preprocessData.m_inPreprocess && !m_localInfo.empty()) {
             // if there is local.set code ahead,
             // we can use local variable position as expr target position
             auto localSetInfo = readAheadLocalGetIfExists();
