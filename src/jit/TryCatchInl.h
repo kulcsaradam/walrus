@@ -174,6 +174,8 @@ static sljit_sw findCatch(sljit_sw current, uint8_t* bp, ExecutionContext* conte
         while (i < end) {
             if (catchBlocks[i].tagIndex == std::numeric_limits<uint32_t>::max()) {
                 context->error = ExecutionContext::NoError;
+
+                context->clearException();
                 return catchBlocks[i].handlerAddr;
             }
 
@@ -182,6 +184,8 @@ static sljit_sw findCatch(sljit_sw current, uint8_t* bp, ExecutionContext* conte
                 memcpy(bp + catchBlocks[i].stackSizeToBe,
                        context->capturedException->userExceptionData().data(),
                        tag->functionType()->paramStackSize());
+
+                context->clearException();
                 return catchBlocks[i].handlerAddr;
             }
 

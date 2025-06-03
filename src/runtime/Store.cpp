@@ -42,6 +42,11 @@ Store::~Store()
         delete m_externs[i];
     }
 
+    for (auto elem : m_waiterList) {
+        delete elem;
+        elem = nullptr;
+    }
+
     Store::finalize();
 }
 

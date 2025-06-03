@@ -852,7 +852,9 @@ public:
 
     virtual void BeginElemSegmentInitExpr(Index index) override
     {
-        beginFunction(new Walrus::ModuleFunction(Walrus::Store::getDefaultFunctionType(Walrus::Value::I32)), true);
+        Walrus::ModuleFunction* mf = new Walrus::ModuleFunction(Walrus::Store::getDefaultFunctionType(Walrus::Value::I32));
+        beginFunction(mf, true);
+        m_result.m_functions.push_back(mf);
     }
 
     virtual void EndElemSegmentInitExpr(Index index) override
@@ -872,7 +874,9 @@ public:
 
     virtual void BeginElemExpr(Index elem_index, Index expr_index) override
     {
-        beginFunction(new Walrus::ModuleFunction(Walrus::Store::getDefaultFunctionType(Walrus::Value::FuncRef)), true);
+        Walrus::ModuleFunction* mf = new Walrus::ModuleFunction(Walrus::Store::getDefaultFunctionType(Walrus::Value::FuncRef));
+        beginFunction(mf, true);
+        m_result.m_functions.push_back(mf);
     }
 
     virtual void EndElemExpr(Index elem_index, Index expr_index) override
@@ -917,7 +921,9 @@ public:
         ASSERT(index == m_result.m_datas.size());
         ASSERT(m_dataSegmentMemIndex == static_cast<size_t>(-1));
         m_dataSegmentMemIndex = memoryIndex;
-        beginFunction(new Walrus::ModuleFunction(Walrus::Store::getDefaultFunctionType(Walrus::Value::I32)), true);
+        Walrus::ModuleFunction* mf = new Walrus::ModuleFunction(Walrus::Store::getDefaultFunctionType(Walrus::Value::I32));
+        m_result.m_functions.push_back(mf);
+        beginFunction(mf, true);
     }
 
     virtual void BeginDataSegmentInitExpr(Index index) override
@@ -1025,6 +1031,11 @@ public:
             m_currentFunction->m_local.push_back(wType);
             m_localInfo.push_back(LocalInfo(wType, m_functionStackSizeSoFar));
             auto sz = Walrus::valueStackAllocatedSize(wType);
+
+            // FIXME too many stack usage. we could not support this(yet)
+            ASSERT(m_initialFunctionStackSize + sz <= std::numeric_limits<Walrus::ByteCodeStackOffset>::max());
+            ASSERT(m_functionStackSizeSoFar + sz <= std::numeric_limits<Walrus::ByteCodeStackOffset>::max());
+
             m_initialFunctionStackSize += sz;
             m_functionStackSizeSoFar += sz;
             count--;
