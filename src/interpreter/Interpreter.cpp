@@ -483,6 +483,11 @@ ByteCodeStackOffset* Interpreter::interpret(ExecutionState& state,
                                             uint8_t* bp,
                                             Instance* instance)
 {
+#if defined(WALRUS_ENABLE_COMPUTED_GOTO)
+    ASSERT((sizeof(g_byteCodeTable.m_addressTable) / sizeof(ByteCode)) == 662);
+#elif
+#endif
+
     Memory** memories = reinterpret_cast<Memory**>(reinterpret_cast<uintptr_t>(instance) + Instance::alignedSize());
 
     state.m_programCounterPointer = &programCounter;
