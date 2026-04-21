@@ -7,10 +7,10 @@
   "author": {
     "name": "Samsung Electronics Co., Ltd."
   },
-  "homepage": "https://github.com/rerobika/escargot-vscode-extension",
+  "homepage": "https://github.com/Samsung/escargot-vscode-extension",
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/rerobika/escargot-vscode-extension.git"
+    "url": "git+https://github.com/Samsung/escargot-vscode-extension.git"
   },
   "license": "Apache-2.0",
   "private": false,
