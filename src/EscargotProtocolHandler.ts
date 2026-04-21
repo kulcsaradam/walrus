@@ -304,6 +304,7 @@ export class EscargotDebugProtocolHandler {
       [SP.SERVER.ESCARGOT_DEBUGGER_WAITING_AFTER_PENDING]:
           this.onWaitingAfterPending,
       [SP.SERVER.ESCARGOT_DEBUGGER_WAIT_FOR_WAIT_EXIT]: this.onWaitForWaitExit,
+      [SP.SERVER.ESCARGOT_DEBUGGER_SNAPSHOT_FINISHED]: this.onSnapshotFinish,
 
       [SP.SERVER.ESCARGOT_DEBUGGER_WATCH_RESULT_8BIT]: this.onEvalResult,
       [SP.SERVER.ESCARGOT_DEBUGGER_WATCH_RESULT_8BIT_END]: this.onEvalResult,
@@ -1322,6 +1323,13 @@ export class EscargotDebugProtocolHandler {
 
   public setWaitBeforeExit(value: boolean): void {
     this.waitBeforeExit = value;
+  }
+
+  private onSnapshotFinish(data: Uint8Array): void {
+    this.logPacket('onSnapshotFinish');
+    this.stringBuffer = assembleUint8Arrays(this.stringBuffer, data);
+    const fileName = createStringFromArray(this.stringBuffer);
+    this.logPacket(`Saved snapshot in file ${fileName}`);
   }
 
   public onTakeHeapSnapshot(): void {
