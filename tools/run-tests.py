@@ -22,13 +22,16 @@ import sys
 import time
 import re
 import fnmatch
+import platform
+import tarfile
 
 from argparse import ArgumentParser
 from difflib import unified_diff
 from glob import glob
 from os.path import abspath, basename, dirname, join, relpath
 from shutil import copy
-from subprocess import PIPE, Popen, run, CalledProcessError
+from subprocess import PIPE, Popen, run, CalledProcessError, DEVNULL
+from urllib.request import urlretrieve, HTTPError
 
 
 PROJECT_SOURCE_DIR = dirname(dirname(abspath(__file__)))
@@ -63,14 +66,14 @@ class runner(object):
             DEFAULT_RUNNERS.append(self.suite)
         return fn
 
-def _run_wast_tests(engine, files, is_fail, args=None):
+def _run_wast_tests(engine, files, is_fail, mapdir="./", args=None):
     fails = 0
     for file in files:
         if jit or jit_no_reg_alloc:
             filename = os.path.basename(file)
             if filename in JIT_EXCLUDE_FILES:
                 continue
-        subprocess_args = qemu + [engine, "--mapdirs", "./test/wasi/var", "/var"]
+        subprocess_args = qemu + [engine, "--mapdirs", mapdir, "/var"]
         if jit or jit_no_reg_alloc: subprocess_args.append("--jit")
         if jit_no_reg_alloc: subprocess_args.append("--jit-no-reg-alloc")
         if web_assembly3: subprocess_args.append("--enable-web-assembly3")
@@ -137,32 +140,87 @@ def run_core_tests(engine):
         raise Exception("wasm-test-core failed")
 
 
-@runner('wasi', default=True)
+@runner('wasip1', default=True)
 def run_wasi_tests(engine):
-    TEST_DIR = join(PROJECT_SOURCE_DIR, 'test', 'wasi')
+    TEST_DIR = join(PROJECT_SOURCE_DIR, 'test', 'wasi', 'preview1')
 
     print('Running wasi tests:')
     xpass = glob(join(TEST_DIR, '*.wast'))
-    xpass += glob(join(TEST_DIR, 'wasi-0.2/*.wast'))
-    args_tests = glob(join(TEST_DIR, 'args.wast'))
-    for item in args_tests:
-        xpass.remove(item)
-
-    xpass_result = _run_wast_tests(engine, xpass, False)
-    xpass_result += _run_wast_tests(engine, args_tests, False,
+    xpass_result = _run_wast_tests(engine, xpass, False, mapdir=join(PROJECT_SOURCE_DIR, 'test', 'wasi', 'preview1'),
                                     args=["Hello", "World!", "Lorem ipsum dolor sit amet, consectetur adipiscing elit"])
 
-    tests_total = len(xpass) + len(args_tests)
+    os.remove(join(TEST_DIR, 'linked.txt'))
+    with open(join(TEST_DIR,"write_to_this.txt"), "r+") as file:
+        file.truncate(0)
+    tests_total = len(xpass)
     fail_total = xpass_result
     print('TOTAL: %d' % (tests_total))
     print('%sPASS : %d%s' % (COLOR_GREEN, tests_total - fail_total, COLOR_RESET))
     print('%sFAIL : %d%s' % (COLOR_RED, fail_total, COLOR_RESET))
 
-    # Reset files
-    os.remove(join(TEST_DIR, 'var/linked.txt'));
-    open(join(TEST_DIR, 'var/write_to_this.txt'), 'w').close()
     if fail_total > 0:
         raise Exception("basic wasi tests failed")
+
+
+@runner('wasip2', default=True)
+def run_wasi_tests(engine):
+    TEST_DIR = join(PROJECT_SOURCE_DIR, 'test', 'wasi', 'preview2')
+    wasi_clang_path = "wasm32-wasip2-clang++"
+    system = ""
+
+    if os.system(wasi_clang_path + " --version >/dev/null") == 0 and False:
+            print("wasm32-wasip2-clang++ was found on the system")
+    else:
+        if sys.platform == 'linux':
+            system = 'linux'
+        elif sys.platform == 'win32':
+            system = 'windows'
+        elif sys.platform == 'darwin':
+            system = 'macos'
+        else:
+            print("Could not identify system: ", sys.platform + ". Exiting now.")
+            return
+
+    folder_name = "wasi-sdk-32.0-"+platform.machine()+"-"+system
+    if system != "" and not os.path.exists(folder_name):
+        print("downloading wasi-sdk for compilation...")
+        url = ("https://github.com/WebAssembly/wasi-sdk/releases/download/wasi-sdk-32/"+folder_name+".tar.gz")
+        try:
+            urlretrieve(url, join(PROJECT_SOURCE_DIR, folder_name+".tar.gz"))
+        except:
+            print("Error happened while downloading the wasi-sdk")
+            return
+        
+        with tarfile.open(folder_name+".tar.gz") as file:
+           file.extractall("./")
+        wasi_clang_path = folder_name+"/bin/wasm32-wasip2-clang++"
+    else:
+        print("using wasm32-wasip2-clang++ found in current directory")
+
+    cpp_sources = os.listdir(join(TEST_DIR,'sources'))
+    flags = "-fno-exceptions"
+    print("compiling test sources...")
+    if not os.path.exists(join(TEST_DIR,"wasm")):
+        os.mkdir(join(TEST_DIR,"wasm"))
+    for source in cpp_sources:
+        os.system(wasi_clang_path + "  " +join(TEST_DIR,'sources', source) + " " + flags +"  " + " -o " + join(TEST_DIR, "wasm", source + ".wasm"))
+
+    print('Running wasi tests:')
+    xpass = glob(join(TEST_DIR, "wasm",'*.wasm')) + glob(join(TEST_DIR, '*.wast'))
+    xpass_result = _run_wast_tests(engine, xpass, False, mapdir="./test/wasi/preview2",
+                                    args=["/var/temp.txt", "Hello", "World!", "Lorem ipsum dolor sit amet, consectetur adipiscing elit"])
+    tests_total = len(xpass)
+    fail_total = xpass_result
+    print('TOTAL: %d' % (tests_total))
+    print('%sPASS : %d%s' % (COLOR_GREEN, tests_total - fail_total, COLOR_RESET))
+    print('%sFAIL : %d%s' % (COLOR_RED, fail_total, COLOR_RESET))
+
+    with open(join(TEST_DIR,"temp.txt"), "r+") as file:
+        file.truncate(0)
+    
+    if fail_total > 0:
+        raise Exception("basic wasi tests failed")
+
 
 @runner('jit', default=True)
 def run_jit_tests(engine):
