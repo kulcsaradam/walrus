@@ -103,6 +103,9 @@ enum WasiNamedInstances : size_t {
     InstanceFileSystemPreOpens02,
     InstanceSocketsUdp02,
     InstanceSocketsTcp02,
+    InstanceSocketsNetwork02,
+    InstanceSocketsUdpCreateSocket02,
+    InstanceSocketsInstanceNetwork02,
     InstanceWasiNNTensor02,
     InstanceWasiNNErrors02,
     InstanceWasiNNInference02,
@@ -139,8 +142,12 @@ public:
     ComponentInstance* loadClockWallInstance();
     ComponentInstance* loadFileSystemTypesInstance();
     ComponentInstance* loadFileSystemPreOpensInstance();
-    ComponentInstance* loadSocketsUdpInstance();
-    ComponentInstance* loadSocketsTcpInstance();
+    ComponentInstance* loadSocketsUdp();
+    ComponentInstance* loadSocketsTcp();
+    ComponentInstance* loadSocketsNetwork();
+    ComponentInstance* loadSocketsNetworkInstance();
+    ComponentInstance* loadSocketsUdpCreateSocket();
+
 #if defined(ENABLE_WASI_NN)
     ComponentInstance* loadWasiNNTensorInstance();
     ComponentInstance* loadWasiNNErrorsInstance();
@@ -488,7 +495,6 @@ inline ComponentInstance* ComponentInstanceWasi02::loadFileSystemTypesInstance()
 
     ComponentInstance* instance = createWasiInstance();
     addResourceExport(instance, "descriptor"); /* 0 */
-    // ComponentValueType* u64Type = new ComponentValueType(ComponentTypeRef::U64);
     addTypeExport(instance, "filesize", new ComponentValueType(ComponentTypeRef::U64)); /* 1 */
     ComponentInstance* streamsInstance = loadInstance(InstanceIoStreams02);
     instance->m_instances.push_back(streamsInstance);
@@ -566,7 +572,6 @@ inline ComponentInstance* ComponentInstanceWasi02::loadFileSystemTypesInstance()
                 ComponentTypeItems::Item{ "link-count", ComponentTypeRef(new ComponentValueType(ComponentTypeRef::U64)) },
                 ComponentTypeItems::Item{ "size", ComponentTypeRef(new ComponentValueType(ComponentTypeRef::U64)) })
     descriptorType->addRef();
-    // u64Type->addRef();
     dateTime->addRef();
     ComponentValueTypeRef* optionalDateTime = new ComponentValueTypeRef(ComponentRefCounted::OptionKind, ComponentTypeRef(dateTime));
     INSERT_INTO(descriptorStat->items(),
@@ -725,12 +730,164 @@ inline ComponentInstance* ComponentInstanceWasi02::loadFileSystemPreOpensInstanc
     return instance;
 }
 
-inline ComponentInstance* ComponentInstanceWasi02::loadSocketsUdpInstance()
+inline ComponentInstance* ComponentInstanceWasi02::loadSocketsUdp()
 {
+    enum typeIndex {
+        udpSocket = 0,
+        incomingDatagramStream = 1,
+        outgoingDatagramStream = 2,
+        networkTypeIdx = 3,
+        ipSocketAddress = 4,
+        errorCode = 5,
+        pollable = 6,
+        incomingDatagramType = 7,
+        outgoingDatagramType = 8
+    };
+
     ComponentInstance* instance = createWasiInstance();
-    addResourceExport(instance, "udp-socket");
-    addResourceExport(instance, "incoming-datagram-stream");
-    addResourceExport(instance, "outgoing-datagram-stream");
+    addResourceExport(instance, "udp-socket"); /* 0 */
+    addResourceExport(instance, "incoming-datagram-stream"); /* 1 */
+    addResourceExport(instance, "outgoing-datagram-stream"); /* 2 */
+    ComponentInstance* network = loadInstance(InstanceSocketsNetwork02);
+    instance->m_instances.push_back(network);
+    addTypeExport(instance, "network", network->type()->getType(0)); /* 3 */
+    addTypeExport(instance, "ip-socket-address", network->type()->getType(5)); /* 4 */
+    addTypeExport(instance, "error-code", network->type()->getType(6)); /* 5 */
+    ComponentInstance* poll = loadInstance(InstanceIoPoll02);
+    instance->m_instances.push_back(poll);
+    addTypeExport(instance, "pollable", poll->type()->getType(0)); /* 6 */
+    ComponentValueTypeRef* list = new ComponentValueTypeRef(ComponentType::ListKind, ComponentTypeRef::U8);
+    ComponentTypeItems* incomingDatagram = new ComponentTypeItems(ComponentType::RecordKind);
+    INSERT_INTO(incomingDatagram->items(),
+                ComponentTypeItems::Item{ "data", list },
+                ComponentTypeItems::Item{ "remote-address", instance->type()->getType(typeIndex::ipSocketAddress) })
+    addTypeExport(instance, "incoming-datagram", incomingDatagram); /* 7 */
+    ComponentValueTypeRef* outgoingDatagramOption = new ComponentValueTypeRef(ComponentType::OptionKind, instance->type()->getType(typeIndex::ipSocketAddress));
+    ComponentTypeItems* outgoingDatagram = new ComponentTypeItems(ComponentType::RecordKind);
+    INSERT_INTO(outgoingDatagram->items(),
+                ComponentTypeItems::Item{ "data", list },
+                ComponentTypeItems::Item{ "remote-address", outgoingDatagramOption })
+    addTypeExport(instance, "outgoing-datagram", outgoingDatagram); /* 8 */
+    ComponentTypeResourceRef* udpBorrow = new ComponentTypeResourceRef(ComponentType::BorrowKind, instance->type()->getType(typeIndex::udpSocket));
+    ComponentTypeResourceRef* networkBorrow = new ComponentTypeResourceRef(ComponentType::BorrowKind, instance->type()->getType(typeIndex::ipSocketAddress));
+    ComponentTypeResult* errorResult = new ComponentTypeResult(ComponentTypeRef(), ComponentTypeRef(instance->type()->getType(typeIndex::errorCode)));
+    ComponentTypeFunc* startBind = new ComponentTypeFunc(ComponentType::FuncKind);
+    {
+        INSERT_INTO(startBind->params(),
+                    ComponentTypeFunc::Param{ "self", udpBorrow },
+                    ComponentTypeFunc::Param{ "network", networkBorrow },
+                    ComponentTypeFunc::Param{ "local-address", instance->type()->getType(typeIndex::ipSocketAddress) })
+        startBind->result() = errorResult;
+        addFuncExport(instance, "[method]udp-socket.start-bind", LiftedWasiFunction::socketsUdpStartBind02, startBind);
+    }
+    ComponentTypeFunc* finishBind = new ComponentTypeFunc(ComponentType::FuncKind);
+    {
+        finishBind->params().push_back(ComponentTypeFunc::Param{ "self", udpBorrow });
+        finishBind->result() = errorResult;
+        addFuncExport(instance, "[method]udp-socket.finish-bind", LiftedWasiFunction::socketsUdpFinishBind02, finishBind);
+    }
+    ComponentTypeTuple* streamResultTuple = new ComponentTypeTuple();
+    INSERT_INTO(streamResultTuple->items(),
+                new ComponentTypeResourceRef(ComponentType::OwnKind, instance->type()->getType(typeIndex::incomingDatagramStream)),
+                new ComponentTypeResourceRef(ComponentType::OwnKind, instance->type()->getType(typeIndex::outgoingDatagramStream)))
+    ComponentTypeFunc* socketStream = new ComponentTypeFunc(ComponentType::FuncKind);
+    {
+        INSERT_INTO(socketStream->params(),
+                    ComponentTypeFunc::Param{ "self", udpBorrow },
+                    ComponentTypeFunc::Param{ "remote-address", new ComponentValueTypeRef(ComponentType::OptionKind, instance->type()->getType(typeIndex::ipSocketAddress)) })
+        socketStream->result() = new ComponentTypeResult(streamResultTuple, instance->type()->getType(typeIndex::errorCode));
+        addFuncExport(instance, "[method]udp-socket.stream", LiftedWasiFunction::socketsUdpStream02, socketStream);
+    }
+    ComponentTypeFunc* localAddr = new ComponentTypeFunc(ComponentType::FuncKind);
+    {
+        localAddr->params().push_back(ComponentTypeFunc::Param{ "self", udpBorrow });
+        localAddr->result() = new ComponentTypeResult(instance->type()->getType(typeIndex::ipSocketAddress), instance->type()->getType(typeIndex::errorCode));
+        addFuncExport(instance, "[method]udp-socket.local-address", LiftedWasiFunction::socketsUdpLocalAddress02, localAddr);
+        addFuncExport(instance, "[method]udp-socket.remote-address", LiftedWasiFunction::socketsUdpRemoteAddress02, localAddr);
+    }
+    ComponentTypeFunc* unicastHoppLimit = new ComponentTypeFunc(ComponentType::FuncKind);
+    {
+        unicastHoppLimit->params().push_back(ComponentTypeFunc::Param{ "self", udpBorrow });
+        unicastHoppLimit->result() = new ComponentTypeResult(ComponentTypeRef(ComponentTypeRef::U8), instance->type()->getType(typeIndex::errorCode));
+        addFuncExport(instance, "[method]udp-socket.unicast-hop-limit", LiftedWasiFunction::socketsUdpUnicastHoppLimit02, unicastHoppLimit);
+    }
+    ComponentTypeFunc* unicastSetHoppLimit = new ComponentTypeFunc(ComponentType::FuncKind);
+    {
+        INSERT_INTO(unicastHoppLimit->params(),
+                    ComponentTypeFunc::Param{ "self", udpBorrow },
+                    ComponentTypeFunc::Param{ "value", ComponentTypeRef(ComponentTypeRef::U8) })
+        unicastSetHoppLimit->result() = errorResult;
+        addFuncExport(instance, "[method]udp-socket.set-unicast-hop-limit", LiftedWasiFunction::socketsUdpUnicastSetHoppLimit02, unicastSetHoppLimit);
+    }
+    ComponentTypeFunc* recieveBufferSize = new ComponentTypeFunc(ComponentType::FuncKind);
+    {
+        recieveBufferSize->params().push_back(ComponentTypeFunc::Param{ "self", udpBorrow });
+        recieveBufferSize->result() = new ComponentTypeResult(ComponentTypeRef(ComponentTypeRef::U64), instance->type()->getType(typeIndex::errorCode));
+        addFuncExport(instance, "[method]udp-socket.receive-buffer-size", LiftedWasiFunction::socketsUdpRecieveBufferSize02, recieveBufferSize);
+    }
+    ComponentTypeFunc* setRecieveBufferSize = new ComponentTypeFunc(ComponentType::FuncKind);
+    {
+        INSERT_INTO(setRecieveBufferSize->params(),
+                    ComponentTypeFunc::Param{ "self", udpBorrow },
+                    ComponentTypeFunc::Param{ "value", ComponentTypeRef(ComponentTypeRef::U64) })
+        setRecieveBufferSize->result() = errorResult;
+        addFuncExport(instance, "[method]udp-socket.set-receive-buffer-size", LiftedWasiFunction::socketsUdpSetRecieveBufferSize02, setRecieveBufferSize);
+    }
+    ComponentTypeFunc* sendBufferSize = new ComponentTypeFunc(ComponentType::FuncKind);
+    {
+        sendBufferSize->params().push_back(ComponentTypeFunc::Param{ "self", udpBorrow });
+        sendBufferSize->result() = new ComponentTypeResult(ComponentTypeRef(ComponentTypeRef::U64), instance->type()->getType(typeIndex::errorCode));
+        addFuncExport(instance, "[method]udp-socket.send-buffer-size", LiftedWasiFunction::socketsUdpSendBufferSize02, sendBufferSize);
+    }
+    ComponentTypeFunc* setSendBufferSize = new ComponentTypeFunc(ComponentType::FuncKind);
+    {
+        INSERT_INTO(setSendBufferSize->params(),
+                    ComponentTypeFunc::Param{ "self", udpBorrow },
+                    ComponentTypeFunc::Param{ "value", ComponentTypeRef(ComponentTypeRef::U64) })
+        setSendBufferSize->result() = errorResult;
+        addFuncExport(instance, "[method]udp-socket.set-send-buffer-size", LiftedWasiFunction::socketsUdpSetSendBufferSize02, setSendBufferSize);
+    }
+    ComponentTypeFunc* subscribe = new ComponentTypeFunc(ComponentType::FuncKind);
+    {
+        subscribe->params().push_back(ComponentTypeFunc::Param{ "self", udpBorrow });
+        subscribe->result() = new ComponentTypeResourceRef(ComponentType::OwnKind, instance->type()->getType(typeIndex::pollable));
+        addFuncExport(instance, "[method]udp-socket.subscribe", LiftedWasiFunction::socketsUdpSubscribe02, subscribe);
+    }
+    ComponentTypeFunc* recieve = new ComponentTypeFunc(ComponentType::FuncKind);
+    {
+        INSERT_INTO(recieve->params(),
+                    ComponentTypeFunc::Param{ "self", new ComponentTypeResourceRef(ComponentType::BorrowKind, instance->type()->getType(typeIndex::incomingDatagramStream)) },
+                    ComponentTypeFunc::Param{ "max-results", ComponentTypeRef(ComponentTypeRef::U64) })
+        recieve->result() = new ComponentTypeResult(new ComponentValueTypeRef(ComponentType::ListKind, ComponentTypeRef(instance->type()->getType(typeIndex::incomingDatagramType))), instance->type()->getType(typeIndex::errorCode));
+        addFuncExport(instance, "[method]incoming-datagram-stream.receive", LiftedWasiFunction::socketsIncomingDatagramStreamRecieve02, recieve);
+    }
+    ComponentTypeFunc* streamSubscribe = new ComponentTypeFunc(ComponentType::FuncKind);
+    {
+        streamSubscribe->params().push_back(ComponentTypeFunc::Param{ "self", new ComponentTypeResourceRef(ComponentType::BorrowKind, instance->type()->getType(typeIndex::networkTypeIdx)) });
+        streamSubscribe->result() = new ComponentTypeResourceRef(ComponentType::OwnKind, instance->type()->getType(typeIndex::outgoingDatagramStream));
+        addFuncExport(instance, "[method]incoming-datagram-stream.subscribe", LiftedWasiFunction::socketsIncomingDatagramStreamSubscribe02, streamSubscribe);
+    }
+    ComponentTypeFunc* checkSend = new ComponentTypeFunc(ComponentType::FuncKind);
+    {
+        checkSend->params().push_back(ComponentTypeFunc::Param{ "self", new ComponentTypeResourceRef(ComponentType::BorrowKind, instance->type()->getType(typeIndex::incomingDatagramStream)) });
+        checkSend->result() = new ComponentTypeResult(ComponentTypeRef(ComponentTypeRef::U64), instance->type()->getType(typeIndex::errorCode));
+        addFuncExport(instance, "[method]outgoing-datagram-stream.check-send", LiftedWasiFunction::socketsOutgoingDatagramStreamCheckSend02, checkSend);
+    }
+    ComponentTypeFunc* send = new ComponentTypeFunc(ComponentType::FuncKind);
+    {
+        INSERT_INTO(send->params(),
+                    ComponentTypeFunc::Param{ "self", new ComponentTypeResourceRef(ComponentType::BorrowKind, instance->type()->getType(typeIndex::outgoingDatagramStream)) },
+                    ComponentTypeFunc::Param{ "datagrams", new ComponentValueTypeRef(ComponentType::ListKind, ComponentTypeRef(instance->type()->getType(typeIndex::incomingDatagramType))) })
+        send->result() = new ComponentTypeResult(ComponentTypeRef(ComponentTypeRef::U64), instance->type()->getType(typeIndex::errorCode));
+        addFuncExport(instance, "[method]outgoing-datagram-stream.send", LiftedWasiFunction::socketsOutgoingDatagramStreamSend02, send);
+    }
+    ComponentTypeFunc* outgoingSubscribe = new ComponentTypeFunc(ComponentType::FuncKind);
+    {
+        outgoingSubscribe->params().push_back(ComponentTypeFunc::Param{ "self", new ComponentTypeResourceRef(ComponentType::BorrowKind, instance->type()->getType(typeIndex::outgoingDatagramStream)) });
+        outgoingSubscribe->result() = new ComponentTypeResourceRef(ComponentType::OwnKind, instance->type()->getType(typeIndex::pollable));
+        addFuncExport(instance, "[method]outgoing-datagram-stream.subscribe", LiftedWasiFunction::socketsOutgoingDatagramStreamSubscribe02, outgoingSubscribe);
+    }
+
 
     if (m_version < 12) {
         return instance;
@@ -739,13 +896,360 @@ inline ComponentInstance* ComponentInstanceWasi02::loadSocketsUdpInstance()
     return instance;
 }
 
-inline ComponentInstance* ComponentInstanceWasi02::loadSocketsTcpInstance()
+inline ComponentInstance* ComponentInstanceWasi02::loadSocketsTcp()
 {
+    enum typeIndex {
+        tcpSocket = 0,
+        network = 1,
+        ipSocketAddress = 2,
+        errorCode = 3,
+        inputStream = 4,
+        outputStream = 5,
+        duration = 6,
+        pollable = 7,
+        shutdownType = 8
+    };
+
     ComponentInstance* instance = createWasiInstance();
-    addResourceExport(instance, "tcp-socket");
+    addResourceExport(instance, "tcp-socket"); /* 0 */
+    ComponentInstance* networkInstance = loadInstance(InstanceSocketsNetwork02);
+    instance->m_instances.push_back(networkInstance);
+    aliasTypeExport(instance, "network", networkInstance->type()->getType(0)); /* 1 */
+    addTypeExport(instance, "ip-socket-address", networkInstance->type()->getType(5)); /* 2 */
+    addTypeExport(instance, "error-code", networkInstance->type()->getType(6)); /* 3 */
+    ComponentInstance* streamsInstance = loadInstance(InstanceIoStreams02);
+    instance->m_instances.push_back(streamsInstance);
+    aliasTypeExport(instance, "input-stream", streamsInstance->type()->getType(0)); /* 4 */
+    aliasTypeExport(instance, "output-stream", streamsInstance->type()->getType(1)); /* 5 */
+    ComponentInstance* monotonicInstance = loadInstance(InstanceClockMonotonic02);
+    instance->m_instances.push_back(monotonicInstance);
+    aliasTypeExport(instance, "duration", monotonicInstance->type()->getType(1)); /* 6 */
+    ComponentInstance* pollInstance = loadInstance(InstanceIoPoll02);
+    instance->m_instances.push_back(pollInstance);
+    aliasTypeExport(instance, "pollable", pollInstance->type()->getType(0)); /* 7 */
+    ComponentTypeLabels* shutdownTypeLabel = new ComponentTypeLabels(ComponentType::EnumKind);
+    INSERT_INTO(shutdownTypeLabel->labels(), "receive", "send", "both")
+    addTypeExport(instance, "shutdown-type", shutdownTypeLabel); /* 8 */
+    ComponentTypeFunc* startBind = new ComponentTypeFunc(ComponentType::FuncKind);
+    {
+        INSERT_INTO(startBind->params(),
+                    ComponentTypeFunc::Param{ "self", new ComponentTypeResourceRef(ComponentType::BorrowKind, instance->type()->getType(typeIndex::tcpSocket)) },
+                    ComponentTypeFunc::Param{ "network", new ComponentTypeResourceRef(ComponentType::BorrowKind, instance->type()->getType(typeIndex::network)) },
+                    ComponentTypeFunc::Param{ "local-address", instance->type()->getType(typeIndex::ipSocketAddress) })
+        instance->type()->getType(typeIndex::errorCode)->addRef();
+        startBind->result() = MAKE_RESULT(, instance->type()->getType(typeIndex::errorCode));
+        addFuncExport(instance, "[method]tcp-socket.start-bind", LiftedWasiFunction::socketsTcpStartBind02, startBind);
+    }
+    ComponentTypeFunc* finishBind = new ComponentTypeFunc(ComponentType::FuncKind);
+    {
+        finishBind->params().push_back(ComponentTypeFunc::Param{ "self", new ComponentTypeResourceRef(ComponentType::BorrowKind, instance->type()->getType(typeIndex::tcpSocket)) });
+        instance->type()->getType(typeIndex::errorCode)->addRef();
+        finishBind->result() = MAKE_RESULT(, instance->type()->getType(typeIndex::errorCode));
+        addFuncExport(instance, "[method]tcp-socket.finish-bind", LiftedWasiFunction::socketsTcpFinishBind02, finishBind);
+    }
+    ComponentTypeFunc* startConnect = new ComponentTypeFunc(ComponentType::FuncKind);
+    {
+        INSERT_INTO(startConnect->params(),
+                    ComponentTypeFunc::Param{ "self", new ComponentTypeResourceRef(ComponentType::BorrowKind, instance->type()->getType(typeIndex::tcpSocket)) },
+                    ComponentTypeFunc::Param{ "network", new ComponentTypeResourceRef(ComponentType::BorrowKind, instance->type()->getType(typeIndex::network)) },
+                    ComponentTypeFunc::Param{ "remote-address", instance->type()->getType(typeIndex::ipSocketAddress) })
+        instance->type()->getType(typeIndex::errorCode)->addRef();
+        startConnect->result() = MAKE_RESULT(, instance->type()->getType(typeIndex::errorCode));
+        addFuncExport(instance, "[method]tcp-socket.start-connect", LiftedWasiFunction::socketsTcpStartConnect02, startConnect);
+    }
+    ComponentTypeFunc* finishConnect = new ComponentTypeFunc(ComponentType::FuncKind);
+    {
+        finishConnect->params().push_back(ComponentTypeFunc::Param{ "self", new ComponentTypeResourceRef(ComponentType::BorrowKind, instance->type()->getType(typeIndex::tcpSocket)) });
+        ComponentTypeTuple* streamTuple = new ComponentTypeTuple();
+        INSERT_INTO(streamTuple->items(),
+                    new ComponentTypeResourceRef(ComponentType::OwnKind, instance->type()->getType(typeIndex::inputStream)),
+                    new ComponentTypeResourceRef(ComponentType::OwnKind, instance->type()->getType(typeIndex::outputStream)))
+        instance->type()->getType(typeIndex::errorCode)->addRef();
+        finishConnect->result() = MAKE_RESULT(streamTuple, instance->type()->getType(typeIndex::errorCode));
+        addFuncExport(instance, "[method]tcp-socket.finish-connect", LiftedWasiFunction::socketsTcpFinishConnect02, finishConnect);
+    }
+    ComponentTypeFunc* startListen = new ComponentTypeFunc(ComponentType::FuncKind);
+    {
+        startListen->params().push_back(ComponentTypeFunc::Param{ "self", new ComponentTypeResourceRef(ComponentType::BorrowKind, instance->type()->getType(typeIndex::tcpSocket)) });
+        instance->type()->getType(typeIndex::errorCode)->addRef();
+        startListen->result() = MAKE_RESULT(, instance->type()->getType(typeIndex::errorCode));
+        addFuncExport(instance, "[method]tcp-socket.start-listen", LiftedWasiFunction::socketsTcpStartListen02, startListen);
+    }
+    ComponentTypeFunc* finishListen = new ComponentTypeFunc(ComponentType::FuncKind);
+    {
+        finishListen->params().push_back(ComponentTypeFunc::Param{ "self", new ComponentTypeResourceRef(ComponentType::BorrowKind, instance->type()->getType(typeIndex::tcpSocket)) });
+        instance->type()->getType(typeIndex::errorCode)->addRef();
+        finishListen->result() = MAKE_RESULT(, instance->type()->getType(typeIndex::errorCode));
+        addFuncExport(instance, "[method]tcp-socket.finish-listen", LiftedWasiFunction::socketsTcpFinishListen02, finishListen);
+    }
+    ComponentTypeFunc* accept = new ComponentTypeFunc(ComponentType::FuncKind);
+    {
+        accept->params().push_back(ComponentTypeFunc::Param{ "self", new ComponentTypeResourceRef(ComponentType::BorrowKind, instance->type()->getType(typeIndex::tcpSocket)) });
+        ComponentTypeTuple* resultTuple = new ComponentTypeTuple();
+        INSERT_INTO(resultTuple->items(),
+                    new ComponentTypeResourceRef(ComponentType::OwnKind, instance->type()->getType(typeIndex::tcpSocket)),
+                    new ComponentTypeResourceRef(ComponentType::OwnKind, instance->type()->getType(typeIndex::inputStream)),
+                    new ComponentTypeResourceRef(ComponentType::OwnKind, instance->type()->getType(typeIndex::outputStream)))
+        instance->type()->getType(typeIndex::errorCode)->addRef();
+        accept->result() = MAKE_RESULT(resultTuple, instance->type()->getType(typeIndex::errorCode));
+        addFuncExport(instance, "[method]tcp-socket.accept", LiftedWasiFunction::socketsTcpAccept02, accept);
+    }
+    ComponentTypeFunc* localAddress = new ComponentTypeFunc(ComponentType::FuncKind);
+    {
+        localAddress->params().push_back(ComponentTypeFunc::Param{ "self", new ComponentTypeResourceRef(ComponentType::BorrowKind, instance->type()->getType(typeIndex::tcpSocket)) });
+        instance->type()->getType(typeIndex::ipSocketAddress)->addRef();
+        instance->type()->getType(typeIndex::errorCode)->addRef();
+        localAddress->result() = MAKE_RESULT(instance->type()->getType(typeIndex::ipSocketAddress), instance->type()->getType(typeIndex::errorCode));
+        addFuncExport(instance, "[method]tcp-socket.local-address", LiftedWasiFunction::socketsTcpLocalAddress02, localAddress);
+        localAddress->addRef();
+        addFuncExport(instance, "[method]tcp-socket.remote-address", LiftedWasiFunction::socketsTcpRemoteAddress02, localAddress);
+    }
+    ComponentTypeFunc* isListening = new ComponentTypeFunc(ComponentType::FuncKind);
+    {
+        isListening->params().push_back(ComponentTypeFunc::Param{ "self", new ComponentTypeResourceRef(ComponentType::BorrowKind, instance->type()->getType(typeIndex::tcpSocket)) });
+        isListening->result() = ComponentTypeRef(ComponentTypeRef::Bool);
+        addFuncExport(instance, "[method]tcp-socket.is-listening", LiftedWasiFunction::socketsTcpIsListening02, isListening);
+    }
+    ComponentTypeFunc* setListenBacklogSize = new ComponentTypeFunc(ComponentType::FuncKind);
+    {
+        INSERT_INTO(setListenBacklogSize->params(),
+                    ComponentTypeFunc::Param{ "self", new ComponentTypeResourceRef(ComponentType::BorrowKind, instance->type()->getType(typeIndex::tcpSocket)) },
+                    ComponentTypeFunc::Param{ "value", ComponentTypeRef(ComponentTypeRef::U64) })
+        instance->type()->getType(typeIndex::errorCode)->addRef();
+        setListenBacklogSize->result() = MAKE_RESULT(, instance->type()->getType(typeIndex::errorCode));
+        addFuncExport(instance, "[method]tcp-socket.set-listen-backlog-size", LiftedWasiFunction::socketsTcpSetListenBacklogSize02, setListenBacklogSize);
+    }
+    ComponentTypeFunc* keepAliveEnabled = new ComponentTypeFunc(ComponentType::FuncKind);
+    {
+        keepAliveEnabled->params().push_back(ComponentTypeFunc::Param{ "self", new ComponentTypeResourceRef(ComponentType::BorrowKind, instance->type()->getType(typeIndex::tcpSocket)) });
+        instance->type()->getType(typeIndex::errorCode)->addRef();
+        keepAliveEnabled->result() = MAKE_RESULT(ComponentTypeRef::Bool, instance->type()->getType(typeIndex::errorCode));
+        addFuncExport(instance, "[method]tcp-socket.keep-alive-enabled", LiftedWasiFunction::socketsTcpKeepAliveEnabled02, keepAliveEnabled);
+    }
+    ComponentTypeFunc* setKeepAliveEnabled = new ComponentTypeFunc(ComponentType::FuncKind);
+    {
+        INSERT_INTO(setKeepAliveEnabled->params(),
+                    ComponentTypeFunc::Param{ "self", new ComponentTypeResourceRef(ComponentType::BorrowKind, instance->type()->getType(typeIndex::tcpSocket)) },
+                    ComponentTypeFunc::Param{ "value", ComponentTypeRef(ComponentTypeRef::Bool) })
+        instance->type()->getType(typeIndex::errorCode)->addRef();
+        setKeepAliveEnabled->result() = MAKE_RESULT(, instance->type()->getType(typeIndex::errorCode));
+        addFuncExport(instance, "[method]tcp-socket.set-keep-alive-enabled", LiftedWasiFunction::socketsTcpSetKeepAliveEnabled02, setKeepAliveEnabled);
+    }
+    ComponentTypeFunc* keepAliveIdleTime = new ComponentTypeFunc(ComponentType::FuncKind);
+    {
+        keepAliveIdleTime->params().push_back(ComponentTypeFunc::Param{ "self", new ComponentTypeResourceRef(ComponentType::BorrowKind, instance->type()->getType(typeIndex::tcpSocket)) });
+        instance->type()->getType(typeIndex::duration)->addRef();
+        instance->type()->getType(typeIndex::errorCode)->addRef();
+        keepAliveIdleTime->result() = MAKE_RESULT(instance->type()->getType(typeIndex::duration), instance->type()->getType(typeIndex::errorCode));
+        addFuncExport(instance, "[method]tcp-socket.keep-alive-idle-time", LiftedWasiFunction::socketsTcpKeepAliveIdleTime02, keepAliveIdleTime);
+        keepAliveIdleTime->addRef();
+        addFuncExport(instance, "[method]tcp-socket.keep-alive-interval", LiftedWasiFunction::socketsTcpKeepAliveInterval02, keepAliveIdleTime);
+    }
+    ComponentTypeFunc* setKeepAliveIdleTime = new ComponentTypeFunc(ComponentType::FuncKind);
+    {
+        INSERT_INTO(setKeepAliveIdleTime->params(),
+                    ComponentTypeFunc::Param{ "self", new ComponentTypeResourceRef(ComponentType::BorrowKind, instance->type()->getType(typeIndex::tcpSocket)) },
+                    ComponentTypeFunc::Param{ "value", ComponentTypeRef(ComponentTypeRef::U64) })
+        instance->type()->getType(typeIndex::errorCode)->addRef();
+        setKeepAliveIdleTime->result() = MAKE_RESULT(, instance->type()->getType(typeIndex::errorCode));
+        addFuncExport(instance, "[method]tcp-socket.set-keep-alive-idle-time", LiftedWasiFunction::socketsTcpSetKeepAliveIdleTime02, setKeepAliveIdleTime);
+        setKeepAliveIdleTime->addRef();
+        addFuncExport(instance, "[method]tcp-socket.set-keep-alive-interval", LiftedWasiFunction::socketsTcpSetKeepAliveInterval02, setKeepAliveIdleTime);
+    }
+    ComponentTypeFunc* keepAliveCount = new ComponentTypeFunc(ComponentType::FuncKind);
+    {
+        keepAliveCount->params().push_back(ComponentTypeFunc::Param{ "self", new ComponentTypeResourceRef(ComponentType::BorrowKind, instance->type()->getType(typeIndex::tcpSocket)) });
+        instance->type()->getType(typeIndex::errorCode)->addRef();
+        keepAliveCount->result() = MAKE_RESULT(ComponentTypeRef::U32, instance->type()->getType(typeIndex::errorCode));
+        addFuncExport(instance, "[method]tcp-socket.keep-alive-count", LiftedWasiFunction::socketsTcpKeepAliveCount02, keepAliveCount);
+    }
+    ComponentTypeFunc* setKeepAliveCount = new ComponentTypeFunc(ComponentType::FuncKind);
+    {
+        INSERT_INTO(setKeepAliveCount->params(),
+                    ComponentTypeFunc::Param{ "self", new ComponentTypeResourceRef(ComponentType::BorrowKind, instance->type()->getType(typeIndex::tcpSocket)) },
+                    ComponentTypeFunc::Param{ "value", ComponentTypeRef(ComponentTypeRef::U32) })
+        instance->type()->getType(typeIndex::errorCode)->addRef();
+        setKeepAliveCount->result() = MAKE_RESULT(, instance->type()->getType(typeIndex::errorCode));
+        addFuncExport(instance, "[method]tcp-socket.set-keep-alive-count", LiftedWasiFunction::socketsTcpSetKeepAliveCount02, setKeepAliveCount);
+    }
+    ComponentTypeFunc* hopLimit = new ComponentTypeFunc(ComponentType::FuncKind);
+    {
+        hopLimit->params().push_back(ComponentTypeFunc::Param{ "self", new ComponentTypeResourceRef(ComponentType::BorrowKind, instance->type()->getType(typeIndex::tcpSocket)) });
+        instance->type()->getType(typeIndex::errorCode)->addRef();
+        hopLimit->result() = MAKE_RESULT(ComponentTypeRef::U8, instance->type()->getType(typeIndex::errorCode));
+        addFuncExport(instance, "[method]tcp-socket.hop-limit", LiftedWasiFunction::socketsTcpHopLimit02, hopLimit);
+    }
+    ComponentTypeFunc* setHopLimit = new ComponentTypeFunc(ComponentType::FuncKind);
+    {
+        INSERT_INTO(setHopLimit->params(),
+                    ComponentTypeFunc::Param{ "self", new ComponentTypeResourceRef(ComponentType::BorrowKind, instance->type()->getType(typeIndex::tcpSocket)) },
+                    ComponentTypeFunc::Param{ "value", ComponentTypeRef(ComponentTypeRef::U8) })
+        instance->type()->getType(typeIndex::errorCode)->addRef();
+        setHopLimit->result() = MAKE_RESULT(, instance->type()->getType(typeIndex::errorCode));
+        addFuncExport(instance, "[method]tcp-socket.set-hop-limit", LiftedWasiFunction::socketsTcpSetHopLimit02, setHopLimit);
+    }
+    ComponentTypeFunc* bufferSize = new ComponentTypeFunc(ComponentType::FuncKind);
+    {
+        bufferSize->params().push_back(ComponentTypeFunc::Param{ "self", new ComponentTypeResourceRef(ComponentType::BorrowKind, instance->type()->getType(typeIndex::tcpSocket)) });
+        instance->type()->getType(typeIndex::errorCode)->addRef();
+        bufferSize->result() = MAKE_RESULT(ComponentTypeRef::U64, instance->type()->getType(typeIndex::errorCode));
+        addFuncExport(instance, "[method]tcp-socket.receive-buffer-size", LiftedWasiFunction::socketsTcpRecieveBufferSize02, bufferSize);
+        bufferSize->addRef();
+        addFuncExport(instance, "[method]tcp-socket.send-buffer-size", LiftedWasiFunction::socketsTcpSendBufferSize02, bufferSize);
+    }
+    ComponentTypeFunc* setBufferSize = new ComponentTypeFunc(ComponentType::FuncKind);
+    {
+        INSERT_INTO(setBufferSize->params(),
+                    ComponentTypeFunc::Param{ "self", new ComponentTypeResourceRef(ComponentType::BorrowKind, instance->type()->getType(typeIndex::tcpSocket)) },
+                    ComponentTypeFunc::Param{ "value", ComponentTypeRef(ComponentTypeRef::U64) })
+        instance->type()->getType(typeIndex::errorCode)->addRef();
+        setBufferSize->result() = MAKE_RESULT(, instance->type()->getType(typeIndex::errorCode));
+        addFuncExport(instance, "[method]tcp-socket.set-receive-buffer-size", LiftedWasiFunction::socketsTcpSetRecieveBufferSize02, setBufferSize);
+        setBufferSize->addRef();
+        addFuncExport(instance, "[method]tcp-socket.set-send-buffer-size", LiftedWasiFunction::socketsTcpSetSendBufferSize02, setBufferSize);
+    }
+    ComponentTypeFunc* subscribe = new ComponentTypeFunc(ComponentType::FuncKind);
+    {
+        subscribe->params().push_back(ComponentTypeFunc::Param{ "self", new ComponentTypeResourceRef(ComponentType::BorrowKind, instance->type()->getType(typeIndex::tcpSocket)) });
+        subscribe->result() = new ComponentTypeResourceRef(ComponentType::OwnKind, instance->type()->getType(typeIndex::pollable));
+        addFuncExport(instance, "[method]tcp-socket.subscribe", LiftedWasiFunction::socketsTcpSubscrie02, subscribe);
+    }
+    ComponentTypeFunc* shutdown = new ComponentTypeFunc(ComponentType::FuncKind);
+    {
+        INSERT_INTO(shutdown->params(),
+                    ComponentTypeFunc::Param{ "self", new ComponentTypeResourceRef(ComponentType::BorrowKind, instance->type()->getType(typeIndex::tcpSocket)) },
+                    ComponentTypeFunc::Param{ "shutdown-type", instance->type()->getType(typeIndex::shutdownType) })
+        instance->type()->getType(typeIndex::errorCode)->addRef();
+        shutdown->result() = MAKE_RESULT(, instance->type()->getType(typeIndex::errorCode));
+        addFuncExport(instance, "[method]tcp-socket.shutdown", LiftedWasiFunction::socketsTcpShutdown02, shutdown);
+    }
 
     if (m_version < 12) {
         return instance;
+    }
+
+    return instance;
+}
+
+inline ComponentInstance* ComponentInstanceWasi02::loadSocketsNetwork()
+{
+    enum typeIndex {
+        network = 0,
+        ipv4Address = 1,
+        ipv4SocketAddress = 2,
+        ipv6Address = 3,
+        ipv6SocketAddress = 4,
+        ipSocketAddress = 5,
+        errorCode = 6,
+        ipAddressFamily = 7
+    };
+
+    ComponentInstance* instance = createWasiInstance();
+    addResourceExport(instance, "network"); /* 0 */
+    ComponentTypeTuple* ipv4Tuple = new ComponentTypeTuple();
+    INSERT_INTO(ipv4Tuple->items(),
+                ComponentTypeRef(ComponentTypeRef::U8),
+                ComponentTypeRef(ComponentTypeRef::U8),
+                ComponentTypeRef(ComponentTypeRef::U8),
+                ComponentTypeRef(ComponentTypeRef::U8))
+    addTypeExport(instance, "ipv4-address", ipv4Tuple); /* 1 */
+    ComponentTypeItems* ipv4SocketAddr = new ComponentTypeItems(ComponentType::RecordKind);
+    INSERT_INTO(ipv4SocketAddr->items(),
+                ComponentTypeItems::Item{ "port", ComponentTypeRef(ComponentTypeRef::U16) },
+                ComponentTypeItems::Item{ "address", ComponentTypeRef(ipv4Tuple) })
+    addTypeExport(instance, "ipv4-socket-address", ipv4SocketAddr); /* 2 */
+    ComponentTypeTuple* ipv6Tuple = new ComponentTypeTuple();
+    INSERT_INTO(ipv6Tuple->items(),
+                ComponentTypeRef(ComponentTypeRef::U16),
+                ComponentTypeRef(ComponentTypeRef::U16),
+                ComponentTypeRef(ComponentTypeRef::U16),
+                ComponentTypeRef(ComponentTypeRef::U16),
+                ComponentTypeRef(ComponentTypeRef::U16),
+                ComponentTypeRef(ComponentTypeRef::U16),
+                ComponentTypeRef(ComponentTypeRef::U16),
+                ComponentTypeRef(ComponentTypeRef::U16))
+    addTypeExport(instance, "ipv6-address", ipv6Tuple); /* 3 */
+    ComponentTypeItems* ipv6SocketAddr = new ComponentTypeItems(ComponentType::RecordKind);
+    INSERT_INTO(ipv6SocketAddr->items(),
+                ComponentTypeItems::Item{ "port", ComponentTypeRef(ComponentTypeRef::U16) },
+                ComponentTypeItems::Item{ "flow-info", ComponentTypeRef(ComponentTypeRef::U32) },
+                ComponentTypeItems::Item{ "address", ComponentTypeRef(ipv6Tuple) },
+                ComponentTypeItems::Item{ "scope-id", ComponentTypeRef(ComponentTypeRef::U32) })
+    addTypeExport(instance, "ipv6-socket-address", ipv6SocketAddr); /* 4 */
+    ComponentTypeItems* ipSocketAddr = new ComponentTypeItems(ComponentType::VariantKind);
+    INSERT_INTO(ipSocketAddr->items(),
+                ComponentTypeItems::Item{ "ipv4", ComponentTypeRef(ipv4SocketAddr) },
+                ComponentTypeItems::Item{ "ipv6", ComponentTypeRef(ipv6SocketAddr) })
+    addTypeExport(instance, "ip-socket-address", ipSocketAddr); /* 5 */
+    ComponentTypeLabels* errorCodeLabel = new ComponentTypeLabels(ComponentType::EnumKind);
+    INSERT_INTO(errorCodeLabel->labels(),
+                "unknown",
+                "access-denied",
+                "not-supported",
+                "invalid-argument",
+                "out-of-memory",
+                "timeout",
+                "concurrency-conflict",
+                "not-in-progress",
+                "would-block",
+                "invalid-state",
+                "new-socket-limit",
+                "address-not-bindable",
+                "address-in-use",
+                "remote-unreachable",
+                "connection-refused",
+                "connection-reset",
+                "connection-aborted",
+                "datagram-too-large",
+                "name-unresolvable",
+                "temporary-resolver-failure",
+                "permanent-resolver-failure")
+    addTypeExport(instance, "error-code", errorCodeLabel); /* 6 */
+    ComponentTypeLabels* ipFamilyLabel = new ComponentTypeLabels(ComponentType::EnumKind);
+    INSERT_INTO(ipFamilyLabel->labels(),
+                "ipv4",
+                "ipv6")
+    addTypeExport(instance, "ip-address-family", ipFamilyLabel); /* 7 */
+
+    return instance;
+}
+
+inline ComponentInstance* ComponentInstanceWasi02::loadSocketsNetworkInstance()
+{
+    ComponentInstance* instance = createWasiInstance();
+    ComponentInstance* networkInstance = loadInstance(InstanceSocketsNetwork02);
+    instance->m_instances.push_back(networkInstance);
+    aliasTypeExport(instance, "network", networkInstance->type()->getType(0)); /* 0 */
+    ComponentTypeFunc* instanceNetwork = new ComponentTypeFunc(ComponentType::FuncKind);
+    instanceNetwork->result() = new ComponentTypeResourceRef(ComponentType::OwnKind, instance->type()->getType(0));
+    addFuncExport(instance, "instance-network", LiftedWasiFunction::socketsInstanceNetwork02, instanceNetwork);
+
+    return instance;
+}
+
+
+inline ComponentInstance* ComponentInstanceWasi02::loadSocketsUdpCreateSocket()
+{
+    enum typeIndex {
+        errorCode = 0,
+        ipAddressFamily = 1,
+        udpSocket = 2
+    };
+
+    ComponentInstance* instance = createWasiInstance();
+    ComponentInstance* networkInstance = loadInstance(InstanceSocketsNetwork02);
+    instance->m_instances.push_back(networkInstance);
+    aliasTypeExport(instance, "error-code", networkInstance->type()->getType(6)); /* 0 */
+    aliasTypeExport(instance, "ip-address-family", networkInstance->type()->getType(7)); /* 1 */
+    ComponentInstance* udpInstance = loadInstance(InstanceSocketsUdp02);
+    instance->m_instances.push_back(udpInstance);
+    aliasTypeExport(instance, "udp-socket", udpInstance->type()->getType(0)); /* 2 */
+    ComponentTypeFunc* createUdpSocket = new ComponentTypeFunc(ComponentType::FuncKind);
+    {
+        createUdpSocket->params().push_back(ComponentTypeFunc::Param{ "address-family", instance->type()->getType(typeIndex::ipAddressFamily) });
+        instance->type()->getType(typeIndex::errorCode)->addRef();
+        createUdpSocket->result() = MAKE_RESULT(new ComponentTypeResourceRef(ComponentType::OwnKind, instance->type()->getType(typeIndex::udpSocket)), instance->type()->getType(typeIndex::errorCode));
+        addFuncExport(instance, "create-udp-socket", LiftedWasiFunction::socketsUdpCreateSocket02, createUdpSocket);
     }
 
     return instance;
@@ -971,9 +1475,15 @@ ComponentInstance* ComponentInstanceWasi02::loadInstance(size_t instanceId, bool
     case InstanceFileSystemPreOpens02:
         return loadFileSystemPreOpensInstance();
     case InstanceSocketsUdp02:
-        return loadSocketsUdpInstance();
+        return loadSocketsUdp();
     case InstanceSocketsTcp02:
-        return loadSocketsTcpInstance();
+        return loadSocketsTcp();
+    case InstanceSocketsNetwork02:
+        return loadSocketsNetwork();
+    case InstanceSocketsInstanceNetwork02:
+        return loadSocketsNetworkInstance();
+    case InstanceSocketsUdpCreateSocket02:
+        return loadSocketsUdpCreateSocket();
 #if defined(ENABLE_WASI_NN)
     case InstanceWasiNNTensor02:
         return loadWasiNNTensorInstance();
@@ -1088,9 +1598,15 @@ ComponentInstance* wasi02LoadInstance(Store* store, std::string& name)
         length -= 13;
 
         if (compareName(charData, length, "udp")) {
-            instanceId = InstanceFileSystemTypes02;
+            instanceId = InstanceSocketsUdp02;
         } else if (compareName(charData, length, "tcp")) {
-            instanceId = InstanceFileSystemPreOpens02;
+            instanceId = InstanceSocketsTcp02;
+        } else if (compareName(charData, length, "network")) {
+            instanceId = InstanceSocketsNetwork02;
+        } else if (compareName(charData, length, "instance-network")) {
+            instanceId = InstanceSocketsInstanceNetwork02;
+        } else if (compareName(charData, length, "udp-create-socket")) {
+            instanceId = InstanceSocketsUdpCreateSocket02;
         }
     }
 #if ENABLE_WASI_NN
